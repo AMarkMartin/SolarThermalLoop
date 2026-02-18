@@ -12,8 +12,9 @@ Solar Irradiance + Ambient Temp
 └──────┬────────▲─────┘
        │        │
   hot  │        │ cooled
- fluid │        │ fluid   ◄──── Solar pump (solar loop)
-       │        │
+ fluid │  solar │ fluid   
+       |  pump  |
+       │    └──►│
 ┌──────▼────────┴─────┐
 │    Storage Tank     │
 └──────┬────────▲─────┘
