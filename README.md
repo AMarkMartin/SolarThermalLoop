@@ -6,20 +6,25 @@ A physics-based simulation of a solar-assisted heating system. Two fluid loops s
 
 ```
 Solar Irradiance + Ambient Temp
-         │
-    ┌────▼──────────────┐
-    │  Solar Collector  │
-    └────────┬──────────┘
-             │ hot fluid
-    ┌────────▼──────────┐
-    │   Storage Tank    │◄──── Solar pump (solar loop)
-    └────────┬──────────┘
-             │ warm supply
-    ┌────────▼──────────┐
-    │  Building / Load  │◄──── Load pump (load loop)
-    └───────────────────┘
-             │ cool return
-             └────────────► back to tank
+           │
+┌──────────▼──────────┐
+│   Solar Collector   │
+└──────┬────────▲─────┘
+       │        │
+  hot  │        │ cooled
+ fluid │        │ fluid   ◄──── Solar pump (solar loop)
+       │        │
+┌──────▼────────┴─────┐
+│    Storage Tank     │
+└──────┬────────▲─────┘
+       │        │
+  warm │        │ cool
+ supply│  heat  │ return
+       │  pump  │
+       |◄──'    |
+┌──────▼────────┴─────┐
+│   Building / Load   │
+└─────────────────────┘
 ```
 
 ---
