@@ -8,6 +8,9 @@ Run with:
 import os, sys
 import numpy as np
 import streamlit as st
+
+# np.trapz was removed in NumPy 2.0; fall back gracefully for older installs
+_trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from typing import Dict, Any
@@ -454,9 +457,9 @@ h  = st.session_state["history"]
 t  = h["time"]
 ts = t * 3600  # seconds
 
-E_dem  = float(np.trapz(h["Q_building_demand"], ts)) / 3.6e6
-E_sol  = float(np.trapz(h["Q_solar_delivered"], ts)) / 3.6e6
-E_aux  = float(np.trapz(h["Q_auxiliary"],       ts)) / 3.6e6
+E_dem  = float(_trapz(h["Q_building_demand"], ts)) / 3.6e6
+E_sol  = float(_trapz(h["Q_solar_delivered"], ts)) / 3.6e6
+E_aux  = float(_trapz(h["Q_auxiliary"],       ts)) / 3.6e6
 avg_sf = float(np.mean(h["solar_fraction"])) * 100
 cost   = float(np.sum(h["aux_cost"]))
 Tlo    = float(np.min(h["T_tank"]))
@@ -876,7 +879,7 @@ with tab_sol_exp:
     peak_irr = float(np.max(sol_total))
     peak_hr  = float(hours_fine[np.argmax(sol_total)]) if peak_irr > 0 else 12.0
     daylight = float(np.sum(sol_alt > 0) * 0.25)
-    daily_kwh = float(np.trapz(sol_total, hours_fine) / 1000)  # kWh/m²
+    daily_kwh = float(_trapz(sol_total, hours_fine) / 1000)  # kWh/m²
 
     ec1, ec2, ec3, ec4 = st.columns(4)
     ec1.metric("Peak Irradiance",   f"{peak_irr:.0f} W/m²")
