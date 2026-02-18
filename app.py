@@ -429,7 +429,7 @@ Solar Irradiance + Ambient Temp
   warm │        │ cool
  supply│  heat  │ return
        │  pump  │
-       |◄──'    |
+       |◄──┘    |
 ┌──────▼────────┴─────┐
 │   Building / Load   │
 └─────────────────────┘
