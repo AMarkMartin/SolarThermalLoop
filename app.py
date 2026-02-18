@@ -416,24 +416,18 @@ if "history" not in st.session_state:
 Solar Irradiance + Ambient Temp
          │
     ┌────▼──────────────┐
-    │  Solar Collector  │◄──── cold draw (bottom of tank)
+    │  Solar Collector  │
     └────────┬──────────┘
              │ hot fluid
-       ┌─────▼──────┐
-       │ Solar Pump │   ← solar loop
-       └─────┬──────┘
     ┌────────▼──────────┐
-    │   Storage Tank    │
+    │   Storage Tank    │◄──── Solar pump (solar loop)
     └────────┬──────────┘
              │ warm supply
-       ┌─────▼──────┐
-       │  Load Pump │   ← load loop
-       └─────┬──────┘
     ┌────────▼──────────┐
-    │  Building / Load  │
-    └────────┬──────────┘
+    │  Building / Load  │◄──── Load pump (load loop)
+    └───────────────────┘
              │ cool return
-             └────────────► back to tank (bottom)
+             └────────────► back to tank
 ```
 
 **Six tabs are available after running the simulation:**
