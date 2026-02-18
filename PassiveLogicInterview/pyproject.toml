@@ -1,0 +1,12 @@
+[project]
+name = "solar-thermal-simulation"
+version = "2.0.0"
+description = "Solar-assisted heat pump system simulation for Passive Logic interview"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+    "matplotlib>=3.3.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

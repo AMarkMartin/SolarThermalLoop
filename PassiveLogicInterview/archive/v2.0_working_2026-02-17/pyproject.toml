@@ -1,0 +1,9 @@
+[project]
+name = "solar-thermal-simulation"
+version = "1.0.0"
+description = "Solar thermal system simulation for Passive Logic interview"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+    "matplotlib>=3.3.0",
+]

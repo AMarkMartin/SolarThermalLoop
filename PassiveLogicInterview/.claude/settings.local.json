@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(\"C:\\\\Users\\\\Adam\\\\.local\\\\bin\\\\uv.exe\" run solar_thermal_simulation.py)"
+    ]
+  }
+}
