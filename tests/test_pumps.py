@@ -8,7 +8,7 @@ import numpy as np
 import sys
 sys.path.insert(0, '../')
 
-from src.models import PumpWithCurve
+from src.components import PumpWithCurve
 
 
 class TestPumpCurves:

@@ -594,6 +594,114 @@ class Pump(Component):
 
 
 # ============================================================================
+# PUMP WITH PERFORMANCE CURVES
+# ============================================================================
+
+class PumpWithCurve(Component):
+    """
+    Pump with realistic performance curve.
+    Head and efficiency vary with flow rate.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        rated_flow: float = 0.05,  # kg/s at BEP
+        rated_head: float = 5.0,  # meters at BEP
+        max_head: float = 8.0,  # shutoff head (m)
+        efficiency_bep: float = 0.70  # efficiency at best efficiency point
+    ):
+        super().__init__(name)
+        self.rated_flow = rated_flow
+        self.rated_head = rated_head
+        self.max_head = max_head
+        self.efficiency_bep = efficiency_bep
+
+        self.speed = 1.0  # Speed setpoint (0-1)
+        self.flow_rate = 0.0
+        self.head = 0.0
+        self.efficiency = 0.0
+        self.power = 0.0
+
+    def pump_curve(self, flow_fraction: float) -> float:
+        """
+        Calculate head as function of flow (quadratic curve).
+
+        Args:
+            flow_fraction: Flow as fraction of rated (0-1.5)
+
+        Returns:
+            Head in meters
+        """
+        # Quadratic pump curve: H = H_max - k * Q²
+        # At rated flow: H = rated_head
+        k = (self.max_head - self.rated_head) / (self.rated_flow**2)
+        Q = flow_fraction * self.rated_flow * self.speed
+
+        head = self.max_head * self.speed**2 - k * Q**2
+        return max(head, 0.0)
+
+    def efficiency_curve(self, flow_fraction: float) -> float:
+        """
+        Calculate efficiency as function of flow.
+        Peak at BEP, lower at partial/excessive flow.
+        """
+        # Parabolic efficiency curve
+        # Peak at flow_fraction = 1.0
+        eta = self.efficiency_bep * (1 - 0.7 * (flow_fraction - 1.0)**2)
+        return np.clip(eta, 0.1, self.efficiency_bep)
+
+    def update(self, dt: float, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update pump operation with performance curves.
+
+        Inputs:
+            - speed: Commanded speed (0-1)
+            - system_resistance: Optional system resistance (Pa·s/kg)
+        """
+        self.speed = np.clip(inputs.get('speed', self.speed), 0.0, 1.0)
+
+        if self.speed < 0.01:
+            self.flow_rate = 0.0
+            self.head = 0.0
+            self.efficiency = 0.0
+            self.power = 0.0
+        else:
+            # For now, assume flow proportional to speed (simplified)
+            # In reality, would solve pump curve vs system curve
+            flow_fraction = self.speed
+            self.flow_rate = flow_fraction * self.rated_flow
+
+            # Calculate head and efficiency
+            self.head = self.pump_curve(flow_fraction)
+            self.efficiency = self.efficiency_curve(flow_fraction)
+
+            # Power consumption (W)
+            # P = ρ * g * Q * H / η
+            rho = 1000  # kg/m³
+            g = 9.81  # m/s²
+            Q_m3s = self.flow_rate / rho
+            self.power = (rho * g * Q_m3s * self.head / self.efficiency) if self.efficiency > 0 else 0
+
+        return {
+            'flow_rate': self.flow_rate,
+            'speed': self.speed,
+            'head': self.head,
+            'efficiency': self.efficiency,
+            'power': self.power  # Watts
+        }
+
+    def get_state(self) -> Dict[str, Any]:
+        return {
+            'speed': self.speed,
+            'flow_rate': self.flow_rate,
+            'head': self.head,
+            'efficiency': self.efficiency,
+            'power': self.power
+        }
+
+
+# ============================================================================
 # HEAT PUMP COMPONENT (simplified boundary load on tank)
 # ============================================================================
 

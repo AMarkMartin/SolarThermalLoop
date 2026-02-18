@@ -1,372 +1,452 @@
 # Solar Thermal System Simulation
 
-**Version 2.0** — Modular, component-based architecture with realistic physics
+A physics-based simulation of a solar-assisted heating system. Two fluid loops share a central storage tank: a solar loop that collects thermal energy from the sun, and a load loop that delivers it to a building.
 
-A thermodynamically accurate simulation of a solar-assisted heating system. Each physical component (collector, tank, building, pumps) is modeled as an independent module with validated energy-balance closure, allowing components to be swapped or upgraded without changing the system integration code.
+```
+Solar Irradiance + Ambient Temp
+         │
+    ┌────▼──────────────┐
+    │  Solar Collector  │
+    └────────┬──────────┘
+             │ hot fluid
+    ┌────────▼──────────┐
+    │   Storage Tank    │◄──── Solar pump (solar loop)
+    └────────┬──────────┘
+             │ warm supply
+    ┌────────▼──────────┐
+    │  Building / Load  │◄──── Load pump (load loop)
+    └───────────────────┘
+             │ cool return
+             └────────────► back to tank
+```
+
+---
+
+## Solar Loop Components
+
+### Solar Collector — `SolarCollector`
+
+An unglazed flat-plate collector mounted on the roof. No glass cover means higher heat loss but simpler construction and the ability to harvest ambient heat even when irradiance is low — making it a good source-booster for a heat pump.
+
+**Energy balance (per timestep):**
+
+```
+Q_absorbed = irradiance × area × absorptance × optical_efficiency
+Q_loss     = U × area × (T_collector − T_ambient)
+Q_net      = Q_absorbed − Q_loss − Q_to_fluid
+```
+
+The absorber has thermal mass, so its temperature evolves:
+
+```
+dT_collector = (Q_net × dt) / (mass × cp)
+```
+
+Fluid outlet temperature is computed from a heat-exchanger effectiveness model:
+
+```
+T_outlet = T_inlet + α × (T_collector − T_inlet)    α = 0.8
+```
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| Area | 300 m² | Commercial roof array |
+| Optical efficiency | 0.90 | No glazing transmission loss |
+| Absorptance | 0.92 | Dark polymer/metal absorber |
+| Heat loss coefficient | 15 W/(m²·K) | High — unglazed, wind-exposed |
+| Thermal mass | 3000 kg | Absorber + fluid |
+
+**Inputs:** `irradiance` (W/m²), `T_inlet` (°C), `flow_rate` (kg/s), `T_ambient` (°C)
+
+**Outputs:** `T_outlet` (°C), `Q_collected` (W), `T_collector` (°C)
+
+---
+
+### Storage Tank — `StorageTank`
+
+An insulated tank holding the water-glycol working fluid. It is the thermal buffer between collection and demand. Supports two modes:
+
+**Fully-mixed (1 node):** Single energy balance. Fast and simple.
+
+```
+Q_solar = ṁ_solar × cp × (T_inlet_solar − T_tank)
+Q_load  = ṁ_load  × cp × (T_inlet_load  − T_tank)
+Q_loss  = U × A_surface × (T_tank − T_ambient)
+ΔT_tank = (Q_solar + Q_load − Q_loss) × dt / (mass × cp)
+```
+
+**Stratified (N nodes):** Each node is updated separately each timestep via:
+
+1. **Solar advection** — hot return enters top node, propagates downward
+2. **Load advection** — cool return enters bottom node, propagates upward
+3. **Inter-node conduction** — `Q_cond = k_eff × A_cross / Δz × ΔT`
+4. **Standby losses** — per-node heat loss to ambient
+5. **Buoyancy mixing** — an O(N) stack pass enforces stable stratification (hot on top)
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| Volume | 15 m³ | ~15,000 L commercial tank |
+| Mass | 15,450 kg | 30% propylene glycol mixture |
+| Specific heat | 3700 J/(kg·K) | Water-glycol at ~20°C |
+| Heat loss coef. | 0.5 W/(m²·K) | Well-insulated (~100mm foam) |
+| Nodes | 1 (upgradeable) | Set `num_nodes > 1` for stratification |
+
+**Inputs:** `T_inlet_solar`, `flow_rate_solar`, `T_inlet_load`, `flow_rate_load`, `T_ambient`
+
+**Outputs:** `T_tank`, `T_outlet_solar`, `T_outlet_load`, `Q_solar`, `Q_load`, `Q_loss`; stratified mode also reports `T_tank_top`, `T_tank_bottom`, `stratification_dT`
+
+---
+
+### Pump — `Pump` / `PumpWithCurve`
+
+The basic `Pump` uses a linear flow–speed relationship. `PumpWithCurve` adds a realistic quadratic H–Q curve with efficiency and power consumption:
+
+```
+H(Q)  = H_shutoff × speed² − k × Q²       (quadratic pump curve)
+η(Q)  = η_BEP × (1 − 0.7 × (Q/Q_BEP − 1)²)   (parabolic efficiency)
+P     = ρ × g × Q × H / η                 (shaft power, W)
+```
+
+Speed scaling follows the affinity laws: flow ∝ speed, head ∝ speed², power ∝ speed³.
+
+**Inputs:** `speed` (0–1)
+
+**Outputs:** `flow_rate` (kg/s), `head` (m), `efficiency` (–), `power` (W)
+
+---
+
+### Heat Pump — `HeatPump`
+
+Acts as a configurable heat sink on the storage tank (evaporator side). COP is calculated from a fraction of the Carnot limit:
+
+```
+COP_Carnot = T_supply_K / (T_supply_K − T_tank_K)
+COP_actual = carnot_fraction × COP_Carnot      (clipped to 1.5–8.0)
+
+Q_evaporator = Q_heating × (1 − 1/COP)
+W_compressor = Q_heating / COP
+```
+
+| Parameter | Default |
+|-----------|---------|
+| Heating capacity | 300 kW |
+| Carnot fraction | 0.45 |
+| Supply temperature | 45°C |
+| Min source temp | −10°C |
+
+**Inputs:** `T_tank` (°C), `Q_demand` (W)
+
+**Outputs:** `Q_heating`, `Q_evaporator`, `W_compressor`, `COP`
+
+---
+
+## System Inputs
+
+### Solar Radiation Model — `SolarRadiationModel`
+
+Computes irradiance on a tilted surface from first principles.
+
+**Sun position** (Cooper's equation + equation of time correction):
+```
+δ = 23.45° × sin(360° × (284 + day) / 365)        (declination)
+h = arcsin(sin δ sin φ + cos δ cos φ cos ω)        (altitude angle)
+```
+
+**Clear-sky DNI** via air-mass model:
+```
+AM  = 1 / (sin h + 0.506 × (h + 6.08)^−1.636)
+DNI = 1367 × 0.7^AM × exp(−elevation / 8400)
+```
+
+**Tilted-surface irradiance** sums direct, diffuse (isotropic sky), and ground-reflected components:
+```
+I_direct  = DNI × cos(incidence angle) × (1 − cloud_cover)
+I_diffuse = DHI × (1 + cos tilt) / 2 × (1 + cloud_cover)
+I_ground  = GHI × 0.2 × (1 − cos tilt) / 2
+```
+
+**Inputs:** latitude, longitude, elevation, day of year, time of day, cloud cover (0–1), panel tilt & azimuth
+
+**Outputs:** `total` irradiance (W/m²), `direct`, `diffuse`, `ground`, solar `altitude`, `azimuth`, `DNI`
+
+---
+
+### Building Demand — `ThermalLoad` / `BuildingThermalMass`
+
+Two interchangeable building models sharing the same interface:
+
+**`ThermalLoad`** — simple scheduled load. Returns a Q_demand based on the time of day:
+- `constant` — fixed base load
+- `variable` — higher during morning and evening peaks
+- `scheduled` — morning/evening peaks with overnight setback
+
+Outlet temperature is computed from the demand: `T_outlet = T_inlet − Q_demand / (ṁ × cp)`, capped at 20°C drop.
+
+**`BuildingThermalMass`** — full energy balance on the building envelope:
+```
+Q_loss     = UA_envelope × (T_building − T_ambient)
+Q_solar    = irradiance × window_area × SHGC
+Q_net      = Q_delivered + Q_solar + Q_internal_gains − Q_loss
+dT_building = Q_net × dt / (mass × cp)
+```
+Heating demand is determined by a thermostat with deadband; proportional control scales required power to the temperature error.
+
+| Parameter | `BuildingThermalMass` default |
+|-----------|-------------------------------|
+| Floor area | 10,000 m² |
+| Thermal mass | 500,000 kg (heavy concrete) |
+| UA envelope | 3,500 W/K |
+| Internal gains | 150 kW (occupants + equipment) |
+| Setpoint | 21°C with ±1°C deadband |
+| Window area | 500 m² (effective solar aperture) |
+
+**Inputs:** `T_inlet`, `flow_rate`, `T_ambient`, `irradiance`, `time_hours`
+
+**Outputs:** `Q_demand`, `Q_actual`, `T_outlet`, `T_building` (thermal mass only), `load_fraction`
+
+---
+
+## Putting It Together — Demonstrations
+
+### Simulation Loop
+
+Each timestep (dt = 60 s) executes in order:
+
+```
+1. Compute weather → T_ambient, cloud_cover
+2. Solar model    → irradiance on collector
+3. Controller     → read T_collector, T_tank, Q_demand → compute pump speeds
+4. Pump update    → speed → flow_rate
+5. Collector      → T_outlet, Q_collected
+6. Building       → Q_demand, T_outlet_load
+7. Tank           → absorb solar, discharge to load, lose standby heat
+8. Log results
+```
+
+### Spring Shoulder-Season Scenario (primary demo)
+
+A 5-day simulation of a commercial building in early March. The solar loop provides a meaningful fraction of daily heating demand.
+
+**Configuration:**
+- Location: 40°N, 105°W, 1,600 m elevation (Denver area)
+- Collector: 300 m² unglazed, 50° tilt south-facing
+- Tank: 15 m³ water-glycol
+- Building: 10,000 m² commercial, 300 kW heat pump
+
+**Typical results:**
+
+| Metric | Value |
+|--------|-------|
+| Building demand | ~140–170 kWh (5 days) |
+| Solar delivered | ~30–45 kWh |
+| Solar fraction | ~25% |
+| Tank temperature | 20–45°C range |
 
 ---
 
 ## System Architecture
 
-The system models two fluid loops connected through a central storage tank:
+Components share a uniform interface:
 
-```mermaid
-flowchart LR
-    subgraph Solar Loop
-        direction LR
-        SP[Solar Pump] --> SC[Solar Collector\n15 m², η=0.75]
-        SC -->|Hot fluid| ST
-    end
-
-    subgraph Storage
-        ST[Storage Tank\n800 L]
-    end
-
-    subgraph Load Loop
-        direction RL
-        ST -->|Supply| LP[Load Pump]
-        LP --> BL[Building Load\n200 m², 5 kW]
-        BL -->|Return| ST
-    end
-
-    ST -->|Cold return| SP
-
-    ENV([☀ Solar Irradiance\n🌡 Ambient Temp]) -.-> SC
-    ENV -.-> BL
-    AUX([🔥 Auxiliary Heating\nNatural Gas]) -.-> BL
-
-    CTRL{{Controller\nΔT + Hysteresis}} -->|speed| SP
-    CTRL -->|speed| LP
-    CTRL -.->|reads state| ST
-    CTRL -.->|reads state| SC
+```python
+component.update(dt, inputs)  # → outputs dict
+component.get_state()         # → current state dict
 ```
 
-**Solar loop** — A pump circulates water-glycol (cp = 3500 J/kg-K) from the bottom of the storage tank through an unglazed solar collector and back. The controller enables this pump only when the collector-to-tank temperature differential exceeds a threshold (with hysteresis to prevent short-cycling).
+This makes swapping models straightforward — the system integration code doesn't change.
 
-**Load loop** — A second pump draws hot water from the tank to satisfy building heating demand. Any shortfall is covered by auxiliary heating (natural gas at $0.04/kWh). Flow is modulated based on the current thermal load.
+**Example — enabling tank stratification:**
 
----
+```python
+# Before: fully-mixed
+tank = StorageTank("Tank", StorageTankParams(volume=15.0, num_nodes=1))
 
-## Simulation Loop
-
-Each timestep (default dt = 60 s) proceeds through the following sequence:
-
-```mermaid
-flowchart TD
-    A[Compute Weather\nT_outdoor, cloud cover] --> B[Compute Solar Radiation\nSun position → Irradiance components]
-    B --> C[Read System State\nT_collector, T_tank, Q_demand]
-    C --> D[Controller\nDifferential ΔT control with hysteresis]
-    D --> E[Update Pumps\nSpeed → Flow rate via pump curves]
-    E --> F[Update Solar Collector\nQ = η·A·G - U·A·ΔT]
-    F --> G[Update Building Load\nQ_demand = UA·ΔT_indoor-outdoor]
-    G --> H[Update Storage Tank\nEnergy balance: solar in, load out, losses]
-    H --> I[Log Results]
-    I --> A
+# After: 10-node stratified (same interface, richer physics)
+tank = StorageTank("Tank", StorageTankParams(volume=15.0, num_nodes=10))
 ```
 
----
+**Example — swapping the building model:**
 
-## Component Overview
+```python
+# Simple: scheduled load profile
+building = ThermalLoad("Building", ThermalLoadParams(load_profile='scheduled'))
 
-### Class Hierarchy
-
-```mermaid
-classDiagram
-    class Component {
-        <<abstract>>
-        +name: str
-        +update(dt, inputs) Dict
-        +get_state() Dict
-    }
-
-    class FluidComponent {
-        <<abstract>>
-        +fluid: WaterGlycolMixture
-    }
-
-    Component <|-- FluidComponent
-    FluidComponent <|-- SolarCollector
-    FluidComponent <|-- StorageTank
-    FluidComponent <|-- ThermalLoad
-    Component <|-- Pump
-    Component <|-- Valve
-
-    class SolarCollector {
-        +area: float
-        +efficiency: float
-        +heat_loss_coef: float
-        +T_collector: float
-    }
-
-    class StorageTank {
-        +volume: float
-        +T_tank: float
-        +heat_loss_coef: float
-    }
-
-    class ThermalLoad {
-        +load_profile: str
-        +Q_demand: float
-    }
-
-    class Controller {
-        <<abstract>>
-        +compute_control(state) Dict
-    }
-
-    Controller <|-- BasicController
-    Controller <|-- PIDController
-    Controller <|-- OptimizingController
-    Controller <|-- SAHPController
+# Detailed: full thermal mass energy balance
+building = BuildingThermalMass("Building", BuildingParams())
 ```
 
-### Component Details
+**Upgrade paths:**
 
-| Component | Key Physics | Inputs | Outputs |
-|-----------|------------|--------|---------|
-| **SolarCollector** | Q = η·A·G - U·A·(T_c - T_amb), thermal mass | irradiance, T_inlet, flow_rate, T_ambient | T_outlet, Q_collected |
-| **StorageTank** | Fully-mixed energy balance, standby losses | T_inlet (solar & load), flow_rates | T_tank, Q_solar, Q_load, Q_loss |
-| **ThermalLoad** | Q = UA·(T_set - T_outdoor), occupancy schedule | T_supply, flow_rate, T_outdoor | Q_demand, Q_delivered, Q_auxiliary |
-| **PumpWithCurve** | Quadratic H-Q curve, P = ρgQH/η, affinity laws | speed (0–1) | flow_rate, head, power, efficiency |
-| **BasicController** | Differential ΔT with hysteresis, overtemp protection | T_collector, T_tank, Q_demand | pump speeds, valve positions |
-
----
-
-## Results — Spring Shoulder-Season Scenario
-
-The primary demonstration is a **5-day spring simulation** of a residential solar thermal system where the solar loop provides a meaningful share of the building's heating demand.
-
-**Configuration:**
-- Location: 40°N, 105°W, 1600 m elevation (Denver area)
-- Solar collector: 15 m² unglazed, panel tilt 50°
-- Storage tank: 800 L, 1.0 W/(m²·K) insulation
-- Building: 200 m², 5 kW design load at -10°C
-- Season: Early March (day 75), baseline 5°C
-
-**Typical Results** (exact values vary — weather is synthetically generated):
-
-| Metric | Typical Value |
-|--------|---------------|
-| Building demand | ~140–170 kWh |
-| Solar delivered | ~30–45 kWh |
-| Auxiliary (natural gas) | ~110–130 kWh |
-| Solar fraction | ~25% avg |
-| Operating cost (5 days) | ~$4–5 |
-| Tank temperature range | 25–35°C |
-
-### System Temperatures
-
-![System Temperatures](results/system_temperatures.png)
-
-*Tank temperature (red) starts at 35°C and reaches a quasi-steady daily cycle. The collector (orange) swings well above the tank during each sunny period, driving the solar pump. Shaded bands indicate nighttime.*
-
-### Building Heating Breakdown
-
-![Energy Breakdown](results/energy_breakdown.png)
-
-*Stacked area showing solar contribution (green) vs auxiliary gas heating (red). Demand peaks overnight when outdoor temperatures drop and occupancy setback ends in the morning.*
-
-### Cumulative Energy Balance
-
-![Cumulative Energy](results/cumulative_energy.png)
-
-*Running totals of building demand, solar contribution, and auxiliary heating over the full 5-day window. The gap between the solar and demand curves is covered by natural gas.*
-
-### Control Signals
-
-![Control Signals](results/control_signals.png)
-
-*Solar pump (green) activates during daylight hours when the collector-to-tank ΔT exceeds the hysteresis threshold. Load pump (blue) modulates with building demand. Yellow fill shows incident solar irradiance for reference.*
-
-### Full Dashboard
-
-The multi-panel overview with all 11 channels is also available:
-
-![Winter Scenario Dashboard](results/winter_scenario_results.png)
-
----
-
-## Results — Single-Day Baseline (v1.0)
-
-A simpler 24-hour simulation showing the core solar collection cycle with a single collector and tank (no building load loop):
-
-![Solar Thermal Baseline](results/solar_thermal_results.png)
-
-*Collector outlet leads tank temperature during the day, then both cool overnight. Cumulative energy balance shows collection closely tracking tank heat gain.*
-
----
-
-## Control Logic
-
-```mermaid
-flowchart TD
-    START[Read State] --> CHK1{Irradiance > 100 W/m²?}
-    CHK1 -->|No| OFF[Solar Pump OFF]
-    CHK1 -->|Yes| CHK2{T_collector - T_tank > ΔT_threshold?}
-    CHK2 -->|No| HYST{Already running?}
-    HYST -->|Yes, and ΔT > 0.5×threshold| KEEP[Keep Running]
-    HYST -->|No, or ΔT too low| OFF
-    CHK2 -->|Yes| CHK3{T_tank < T_max?}
-    CHK3 -->|No| OFF
-    CHK3 -->|Yes| ON[Solar Pump ON\nSpeed ∝ ΔT]
-
-    ON --> LOAD
-    OFF --> LOAD
-    KEEP --> LOAD
-
-    LOAD{Building demand > 0\nand T_tank > 30°C?}
-    LOAD -->|Yes| LON[Load Pump ON\nSpeed ∝ Q_demand]
-    LOAD -->|No| LMIN[Load Pump minimum circulation]
-```
-
----
-
-## Physics Fidelity
-
-| Model | Fidelity | Notes |
-|-------|----------|-------|
-| Solar radiation | **High** | Geographic sun position (lat, lon, day, hour), direct + diffuse + ground-reflected, cloud attenuation, elevation correction |
-| Pump performance | **High** | Quadratic H-Q curves, efficiency peaks at BEP, affinity laws for variable speed, realistic power consumption |
-| Solar collector | **Medium** | Optical efficiency, linear heat loss, thermal mass; no IAM or wind correction |
-| Storage tank | **Medium** | Fully-mixed (single-node); upgradeable to stratified multi-node |
-| Building load | **Medium** | UA-based envelope model, occupancy schedule, night setback; no thermal mass |
-| Fluid properties | **Medium** | Water-glycol mixture with freeze protection; properties fixed (not temperature-dependent) |
+| Current | Drop-in Upgrade |
+|---------|----------------|
+| Fully-mixed tank | Stratified N-node tank |
+| Simple pump (linear) | `PumpWithCurve` (quadratic H-Q, efficiency) |
+| `ThermalLoad` (profile) | `BuildingThermalMass` (energy balance) |
+| Fixed fluid properties | Temperature-dependent ρ, cp, μ |
+| `BasicController` | `PIDController` or `OptimizingController` (MPC) |
 
 ---
 
 ## Project Structure
 
 ```
-PassiveLogicInterview/
-├── src/                            # Source code
-│   ├── __init__.py
-│   ├── components.py               # Component base classes & implementations
-│   ├── models.py                   # Physics models (solar radiation, pumps)
-│   └── control.py                  # Controller algorithms
-│
-├── examples/                       # Runnable simulations
-│   ├── winter_scenario.py          # ★ Primary demo — 5-day winter heating
-│   ├── realistic_simulation.py     # Summer scenario
-│   ├── modular_simulation.py       # Modular architecture demo
-│   ├── example_upgrade.py          # Component upgrade demo
-│   └── solar_thermal_simulation.py # Baseline v1.0 (self-contained)
-│
-├── tests/                          # Unit & integration tests (51+ tests)
-│   ├── test_solar_radiation.py     # Sun position, irradiance (15 tests)
-│   ├── test_components.py          # Energy balance, physics (18 tests)
-│   ├── test_pumps.py               # Pump curves, efficiency (8 tests)
-│   ├── test_integration.py         # System-level validation (10 tests)
-│   ├── test_heat_pump.py           # Heat pump system tests
-│   └── test_stratification.py      # Tank stratification tests
-│
-├── docs/                           # Extended documentation
-│   ├── ARCHITECTURE.md             # System design & modularity
-│   ├── WINTER_SCENARIO_SUMMARY.md  # Winter simulation analysis
-│   └── PROJECT_STATUS.md           # Status & known issues
-│
-├── results/                        # Generated plots
-│   ├── winter_scenario_results.png
-│   └── solar_thermal_results.png
-│
-├── archive/                        # Version history (v1.0 baseline)
-├── pyproject.toml                  # Project config (uv)
-└── requirements.txt                # Runtime dependencies
+src/
+├── components.py   # SolarCollector, StorageTank, Pump, Valve, HeatPump, ThermalLoad
+├── models.py       # SolarRadiationModel, PumpWithCurve, BuildingThermalMass, WeatherForecast
+└── control.py      # BasicController, SAHPController, PIDController, OptimizingController
+
+examples/
+├── winter_scenario.py          # ★ Primary demo — 5-day heating scenario
+├── realistic_simulation.py     # Summer scenario
+├── modular_simulation.py       # Component swap demonstration
+└── example_upgrade.py          # Stratified tank upgrade
+
+tests/
+├── test_solar_radiation.py     # Sun position, irradiance (15 tests)
+├── test_components.py          # Energy balance, physics (18 tests)
+├── test_pumps.py               # Pump curves, efficiency (8 tests)
+├── test_integration.py         # System-level validation (10 tests)
+├── test_heat_pump.py           # COP and energy balance
+└── test_stratification.py      # Stratified tank mixing
 ```
 
----
-
-## Quick Start
-
-### Install & Run
+### Quick Start
 
 ```bash
-# Install dependencies
 uv sync
-
-# Run the primary demo (5-day winter heating scenario)
-uv run examples/winter_scenario.py
-
-# Run all tests
-cd tests && pytest -v
-
-# Run tests with coverage
-cd tests && pytest --cov=../src
+uv run examples/winter_scenario.py   # primary demo
+cd tests && pytest -v                 # run all tests
 ```
 
-### Dependencies
+**Physics fidelity summary:**
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| numpy | >= 1.20.0 | Numerical computation |
-| matplotlib | >= 3.3.0 | Plotting |
-| pytest | >= 7.0.0 | Testing |
+| Model | Fidelity | Notes |
+|-------|----------|-------|
+| Solar radiation | High | Geographic sun position, air mass, cloud attenuation |
+| Pump performance | High | Quadratic H-Q, efficiency map, affinity laws |
+| Solar collector | Medium | Effectiveness model, thermal mass; no IAM or wind correction |
+| Storage tank | Medium–High | Fully-mixed or stratified with buoyancy mixing |
+| Building load | Medium–High | Profile or full UA + thermal mass energy balance |
+| Fluid properties | Medium | 30% propylene glycol; mild temperature dependence on cp |
 
 ---
 
-## Testing
+## Environment Model
 
-**51+ tests** across 6 modules validate energy conservation, physical realism, and correct system behavior.
+The simulation generates synthetic but realistic weather over the simulation window.
 
-### Energy Balance Validation
+**Temperature:** Sinusoidal daily profile with random day-to-day variation.
+```
+T(t) = T_avg − T_amp × cos(2π × (hour − 15) / 24)
+```
 
-| Scope | Error Bound | Status |
-|-------|------------|--------|
-| Solar collector | < 5% (transient effects) | Pass |
-| Storage tank | < 1% | Pass |
-| Full system | < 5% | Pass |
+**Cloud cover:** Stochastically assigned per day (70% chance of mostly-clear: 0.1–0.3, otherwise partly cloudy: 0.4–0.8) with a diurnal sinusoidal variation superimposed.
 
-### Key Validations
+Both weather streams are accessible ahead of time via `WeatherForecast`, which generates the full sequence at initialization — enabling a future MPC controller to look ahead.
 
-- Solar altitude angles accurate to ±3° vs. analytical formulas
-- Clear-sky irradiance in realistic range (900–1200 W/m²)
-- Pump power matches P = ρgQH/η
-- Temperature bounds enforced (no sub-freezing or super-boiling)
-- Controller hysteresis prevents short-cycling
+**Boundary conditions on components:**
+- Collector heat loss driven by `T_collector − T_ambient`
+- Tank standby loss driven by `T_tank − T_ambient`
+- Building demand driven by `T_setpoint − T_outdoor`
 
 ---
 
-## Upgrade Paths
+## Controller
 
-The modular architecture supports dropping in improved models without changing the system integration code:
+### `BasicController`
 
-```mermaid
-flowchart LR
-    subgraph Current
-        A1[Fully-Mixed Tank]
-        A2[Basic ΔT Control]
-        A3[Fixed Fluid Props]
-    end
+Differential temperature control with hysteresis — the standard proven approach for solar thermal systems.
 
-    subgraph Upgrade
-        B1[Stratified Tank\n10-node 1D model]
-        B2[MPC Controller\nWeather forecast + optimization]
-        B3[T-dependent Properties\nρ, cp, μ = f T]
-    end
+**Solar pump logic:**
+```
+dT = T_collector − T_tank
 
-    A1 -->|same interface| B1
-    A2 -->|same interface| B2
-    A3 -->|same interface| B3
+Turn ON  if: dT > threshold  AND  irradiance > 100 W/m²  AND  T_tank < T_max
+Keep ON  if: dT > 0.5 × threshold  (hysteresis band — prevents short-cycling)
+Turn OFF if: dT < 0.5 × threshold  OR  T_tank ≥ T_max  OR  irradiance < 50 W/m²
+
+Speed = clip(0.3 + (dT − threshold) / 20, 0.3, 1.0)   (variable speed)
 ```
 
-**Example — swapping the tank model:**
+Default thresholds: `threshold = 5°C`, `T_max = 85°C`.
+
+**Load pump logic:**
+```
+If Q_demand > 0 and T_tank > 30°C:
+    speed = clip(Q_demand / (cp × ΔT_load × ṁ_rated), 0.1, 1.0)
+Else:
+    speed = 0.1   (minimum circulation)
+```
+
+### `SAHPController`
+
+Extends the same solar pump logic with a heat pump enable signal instead of a load pump. The tank maximum temperature is lower (45°C) because the tank is a heat pump source, not a direct heating supply.
+
+```
+HP enabled if: Q_demand > 0  AND  T_tank > hp_min_source_temp (−10°C)
+```
+
+### Other Controller Strategies
+
+| Class | Status | Description |
+|-------|--------|-------------|
+| `PIDController` | Template | Feedback on any scalar process variable (e.g., tank temp); includes anti-windup |
+| `OptimizingController` | Placeholder | Hook for MPC — currently delegates to `BasicController`; weather forecast data is already available |
+
+All controllers share the same interface:
 
 ```python
-# Before: fully-mixed
-tank = StorageTank("Tank", StorageTankParams(volume=0.3))
-
-# After: stratified (same interface, different physics)
-tank = StratifiedTank("Tank", StorageTankParams(volume=0.3), num_nodes=10)
-
-# System code is unchanged
-system = WinterHeatingSystem(collector, tank, building, controller, location)
-system.run_simulation()
+control_signals = controller.compute_control(system_state)
 ```
+
+Swapping a controller requires no changes to the simulation loop.
 
 ---
 
-## Version History
+## Results
 
-| Version | Changes |
-|---------|---------|
-| **v2.0** | Modular architecture, realistic solar radiation model, pump performance curves, comprehensive test suite, winter heating scenario, economic analysis |
-| **v1.0** | Monolithic baseline simulation (archived in `archive/v1.0_baseline/`) |
+**System Temperatures**
+
+![System Temperatures](results/system_temperatures.png)
+
+*Collector (orange) swings well above the tank temperature (red) during each sunny period, driving the solar pump. Both cool overnight. Shaded bands indicate nighttime.*
+
+---
+
+**Building Heating Breakdown**
+
+![Energy Breakdown](results/energy_breakdown.png)
+
+*Stacked area showing solar thermal contribution (green) vs auxiliary heating (red) each hour. Demand peaks overnight when outdoor temperatures drop.*
+
+---
+
+**Cumulative Energy Balance**
+
+![Cumulative Energy](results/cumulative_energy.png)
+
+*Running totals of building demand, solar delivered, and auxiliary heating over the 5-day window. The gap between demand and solar is covered by the heat pump.*
+
+---
+
+**Solar Fraction**
+
+![Solar Fraction](results/solar_fraction.png)
+
+*Instantaneous solar fraction with daily average line. Higher fractions occur midday on clear days; the system averages ~25% over the simulation period.*
+
+---
+
+**Control Signals**
+
+![Control Signals](results/control_signals.png)
+
+*Solar pump speed (green) activates during daylight hours when the collector-to-tank ΔT exceeds the hysteresis threshold. Load pump (blue) modulates with building demand. Yellow fill shows incident solar irradiance.*
+
+---
+
+**Full Dashboard**
+
+![Winter Scenario Dashboard](results/winter_scenario_results.png)
+
+*Multi-panel overview with all channels: temperatures, energy flows, pump states, COP, and cumulative totals.*

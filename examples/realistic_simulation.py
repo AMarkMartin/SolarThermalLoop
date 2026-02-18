@@ -15,11 +15,10 @@ from datetime import datetime
 from src.components import (
     SolarCollector, SolarCollectorParams,
     StorageTank, StorageTankParams,
-    Valve
+    Valve, PumpWithCurve
 )
 from src.models import (
     SolarRadiationModel, LocationParams, WeatherForecast,
-    PumpWithCurve,
     BuildingThermalMass, BuildingParams
 )
 from src.control import BasicController

@@ -13,11 +13,10 @@ from typing import Dict, Any, List
 from src.components import (
     SolarCollector, SolarCollectorParams,
     StorageTank, StorageTankParams,
-    Component
+    Component, PumpWithCurve
 )
 from src.models import (
-    SolarRadiationModel, LocationParams, WeatherForecast,
-    PumpWithCurve
+    SolarRadiationModel, LocationParams, WeatherForecast
 )
 from src.control import BasicController
 
