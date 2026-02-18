@@ -287,11 +287,11 @@ building = BuildingThermalMass("Building", BuildingParams())
 
 | Current | Drop-in Upgrade |
 |---------|----------------|
-| Fully-mixed tank | Stratified N-node tank |
-| Simple pump (linear) | `PumpWithCurve` (quadratic H-Q, efficiency) |
+| Stratified N-node tank | Salt Hydrate PCM |
+| `PumpWithCurve` (quadratic H-Q, efficiency) | Real pump curve |
 | `ThermalLoad` (profile) | `BuildingThermalMass` (energy balance) |
-| Fixed fluid properties | Temperature-dependent ρ, cp, μ |
-| `BasicController` | `PIDController` or `OptimizingController` (MPC) |
+| Fixed fluid properties | Temperature-dependent ρ, μ |
+| `SAHPController` (policy with deadband) | `OptimizingController` (MPC) |
 
 ---
 
