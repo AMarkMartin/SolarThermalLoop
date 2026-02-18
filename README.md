@@ -1,5 +1,7 @@
 # Solar Thermal System Simulation
 
+## Live [demo](https://solarthermalloop-hjkbwrnkthuev52nefekh6.streamlit.app/)
+
 A physics-based simulation of a solar-assisted heating system. Two fluid loops share a central storage tank: a solar loop that collects thermal energy from the sun, and a load loop that delivers it to a building.
 
 ```
